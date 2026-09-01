@@ -1,0 +1,9 @@
+# 환경변수 파일 제외
+.env
+.env.local
+.env.development
+.env.production
+
+# 특정 폴더 제외 (폴더명 뒤에 /를 붙입니다)
+data/
+results/
