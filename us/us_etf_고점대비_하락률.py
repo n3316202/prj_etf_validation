@@ -17,9 +17,9 @@ ANALYSIS_DIR = Path(
 
 # 분석할 ETF
 TICKERS = [
-    "TQQQ",
-    "QQQ",
+    "TQQQ",    
     "QLD",
+    "QQQ",
     "SPY",
     "SCHD",
     "DIA",
