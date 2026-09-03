@@ -22,6 +22,9 @@ TICKERS = [
     "QLD",
     "SPY",
     "SCHD",
+    "DIA",
+    "DDM",
+    "UDOW",
 ]
 
 # 결과 파일
@@ -333,34 +336,7 @@ def format_sheet(ws):
     last_data_row = ws.max_row
 
     # --------------------------------------------------------
-    # 최저값 표시 행
-    # --------------------------------------------------------
-
-    summary_row = last_data_row + 1
-
-    # 날짜 컬럼에 "최저값" 표시
-    if date_col:
-
-        cell = ws.cell(
-            row=summary_row,
-            column=date_col
-        )
-
-        cell.value = "최저값"
-
-        cell.fill = SUMMARY_LABEL_FILL
-
-        cell.font = Font(
-            bold=True
-        )
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center"
-        )
-
-    # --------------------------------------------------------
-    # 각 ETF별 최저값 계산
+    # 각 ETF 컬럼의 "년도별 최소값"을 실제 데이터 셀에 표시
     # --------------------------------------------------------
 
     for ticker in TICKERS:
@@ -387,13 +363,10 @@ def format_sheet(ws):
                 continue
 
             try:
-
                 value = float(cell.value)
-
-                values.append(value)
+                values.append((row, value))
 
             except (ValueError, TypeError):
-
                 continue
 
         # 데이터가 없으면 건너뜀
@@ -401,35 +374,102 @@ def format_sheet(ws):
             continue
 
         # --------------------------------------------
-        # 최저값
+        # 해당 "년도 Sheet"에서 ETF 컬럼의 최소값
         # --------------------------------------------
+
+        min_value = min(
+            value
+            for row, value in values
+        )
+
+        # --------------------------------------------
+        # 최소값인 실제 셀을 빨간색 바탕으로 표시
+        # --------------------------------------------
+
+        for row, value in values:
+
+            if value == min_value:
+
+                cell = ws.cell(
+                    row=row,
+                    column=col
+                )
+
+                # 빨간색 바탕
+                cell.fill = MIN_FILL
+
+                # 빨간색 글자 + 굵게
+                cell.font = MIN_FONT
+
+                # 중앙 정렬
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center"
+                )
+
+    # --------------------------------------------------------
+    # 각 ETF 컬럼의 마지막 행에 최소값 표시
+    # --------------------------------------------------------
+    # 실제 데이터의 최소값을 다시 마지막 행에 기록합니다.
+    # 날짜 컬럼에는 "최저값"을 표시합니다.
+    # --------------------------------------------------------
+
+    summary_row = last_data_row + 1
+
+    if date_col:
+        summary_date_cell = ws.cell(
+            row=summary_row,
+            column=date_col
+        )
+        summary_date_cell.value = "최저값"
+        summary_date_cell.fill = SUMMARY_LABEL_FILL
+        summary_date_cell.font = Font(bold=True)
+        summary_date_cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+    for ticker in TICKERS:
+
+        if ticker not in header_map:
+            continue
+
+        col = header_map[ticker]
+        values = []
+
+        for row in range(2, last_data_row + 1):
+
+            cell = ws.cell(
+                row=row,
+                column=col
+            )
+
+            if cell.value is None:
+                continue
+
+            try:
+                values.append(float(cell.value))
+            except (ValueError, TypeError):
+                continue
+
+        if not values:
+            continue
 
         min_value = min(values)
 
-        # --------------------------------------------
-        # 마지막 데이터 다음 줄에 최저값 표시
-        # --------------------------------------------
-
+        # 마지막 행에 최소값 기록
         summary_cell = ws.cell(
             row=summary_row,
             column=col
         )
 
         summary_cell.value = min_value
-
-        # 빨간색 바탕
         summary_cell.fill = MIN_FILL
-
-        # 빨간색 글자 + 굵게
         summary_cell.font = MIN_FONT
-
-        # 중앙 정렬
         summary_cell.alignment = Alignment(
             horizontal="center",
             vertical="center"
         )
-
-        # 숫자 형식
         summary_cell.number_format = "0.00"
 
     # --------------------------------------------------------
@@ -462,7 +502,7 @@ def format_sheet(ws):
     # 자동 필터
     # --------------------------------------------------------
 
-    # 최저값 행은 필터에서 제외
+    # 최저값 요약행은 필터에서 제외
     if last_data_row >= 2:
 
         ws.auto_filter.ref = (
@@ -502,9 +542,10 @@ print()
 print(f"파일 : {OUTPUT_FILE}")
 
 print()
-print("각 Sheet 마지막 행 다음에")
-print("ETF별 최저값을 표시했습니다.")
+print("전체 Sheet와 각 연도 Sheet에서")
+print("ETF별 최소값 실제 셀을 빨간색으로 표시하고,")
+print("각 컬럼 마지막 행에도 최소값을 기록했습니다.")
 
 print()
-print("최저값 셀 = 빨간색 바탕")
+print("최소값 셀 = 빨간색 바탕 + 빨간색 굵은 글씨")
 

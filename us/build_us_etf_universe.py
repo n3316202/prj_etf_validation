@@ -10,7 +10,7 @@ from datetime import datetime
 
 
 # ============================================================
-# Nasdaq Trader
+# ETF Universe 설정
 # ============================================================
 
 START_DATE = "2016-01-01"
@@ -22,17 +22,13 @@ END_DATE = datetime.now().strftime(
 # 요청 간격
 REQUEST_SLEEP = 0.5
 
-DATA_DIR = Path("data/us_etf")
+DATA_DIR = Path("us/data/us_etf")
 
-NASDAQ_URL = (
-    "https://www.nasdaqtrader.com/"
-    "dynamic/SymDir/nasdaqlisted.txt"
-)
+# NASDAQ Trader 직접 접속을 사용하지 않습니다.
+# ETF Universe는 Yahoo Finance Screener(yfinance ETFQuery)를 사용합니다.
 
-OTHER_URL = (
-    "https://www.nasdaqtrader.com/"
-    "dynamic/SymDir/otherlisted.txt"
-)
+YAHOO_SCREEN_SIZE = 250
+YAHOO_SCREEN_MAX_PAGES = 100
 
 
 # ============================================================
@@ -87,188 +83,204 @@ def flatten_columns(df):
     return df
 
 # ============================================================
-# Nasdaq Listed ETF
+# Yahoo Finance ETF Universe
 # ============================================================
 
-def get_nasdaq_etf():
+def _empty_universe():
+
+    return pd.DataFrame(
+        columns=[
+            "티커",
+            "ETF명",
+            "거래소"
+        ]
+    )
+
+
+def _normalize_exchange(exchange):
+    """Yahoo Finance 거래소 코드를 기존 Universe용 이름으로 변환."""
+
+    value = str(exchange or "").strip().upper()
+
+    if value in {
+        "NMS", "NAS", "NASDAQ", "NCM", "NGM",
+        "NQ", "NMQ", "NMS"
+    } or "NASDAQ" in value:
+        return "NASDAQ"
+
+    if value in {
+        "PCX", "ARCX", "NYSEARCA", "ARCA",
+        "NYQ", "NYS", "NYSE", "ASE", "AMX",
+        "BATS", "BZX", "CBOE", "CBO", "BAT",
+        "IEX", "OTC", "OPR"
+    }:
+        return "OTHER"
+
+    # 이름으로도 한 번 더 판별
+    if any(
+        key in value
+        for key in [
+            "NYSE",
+            "ARCA",
+            "CBOE",
+            "BATS",
+            "AMERICAN"
+        ]
+    ):
+        return "OTHER"
+
+    # Yahoo가 거래소 코드를 제공하지 않는 ETF도 미국 ETF
+    # Universe에 남긴다. 최종 거래소는 OTHER로 처리한다.
+    return "OTHER"
+
+
+def _get_yahoo_etf_universe():
+    """
+    Yahoo Finance ETF Screener를 이용해 미국 ETF 전체 후보를 가져온다.
+
+    yfinance 1.3.0부터 ETFQuery가 제공되며, Yahoo Screener는 한 번에
+    최대 250개를 반환하므로 offset을 증가시키며 반복 조회한다.
+    """
 
     print()
-    print("-" * 70)
-    print("① Nasdaq 상장 종목 조회")
-    print("-" * 70)
+    print("  🔎 Yahoo Finance ETF Screener 조회")
 
-    response = requests.get(
-        NASDAQ_URL,
-        headers=HEADERS,
-        timeout=30
-    )
+    ETFQuery = getattr(yf, "ETFQuery", None)
+    screen = getattr(yf, "screen", None)
 
-    response.raise_for_status()
-
-    # --------------------------------------------------------
-    # 응답 확인
-    # --------------------------------------------------------
-
-    text = response.text
-
-    print(
-        f"NASDAQ 응답 크기 : "
-        f"{len(text):,} bytes"
-    )
-
-    if not text.strip():
-        raise ValueError(
-            "NASDAQ 서버에서 빈 응답을 받았습니다."
+    if ETFQuery is None or screen is None:
+        raise RuntimeError(
+            "현재 설치된 yfinance가 ETFQuery를 지원하지 않습니다.\n"
+            "다음 명령으로 업데이트하세요: \n"
+            "python -m pip install -U yfinance"
         )
 
-    # --------------------------------------------------------
-    # 데이터 읽기
-    # --------------------------------------------------------
-
-    df = pd.read_csv(
-        io.StringIO(text),
-        sep="|",
-        dtype=str,
-        keep_default_na=False
+    # 미국 ETF
+    query = ETFQuery(
+        "eq",
+        [
+            "region",
+            "us"
+        ]
     )
 
-    # --------------------------------------------------------
-    # 컬럼명 정리
-    # --------------------------------------------------------
+    rows = []
+    offset = 0
 
-    df.columns = (
-        df.columns
-        .astype(str)
-        .str.replace("\ufeff", "", regex=False)
-        .str.strip()
-    )
+    for page in range(
+        1,
+        YAHOO_SCREEN_MAX_PAGES + 1
+    ):
 
-    print()
-    print("NASDAQ 컬럼:")
-    print(df.columns.tolist())
+        try:
 
-    # --------------------------------------------------------
-    # Symbol 컬럼 확인
-    # --------------------------------------------------------
+            result = yf.screen(
+                query,
+                offset=offset,
+                size=YAHOO_SCREEN_SIZE,
+                sortField="ticker",
+                sortAsc=True
+            )
 
-    if "Symbol" not in df.columns:
+        except Exception as e:
 
-        print()
-        print("❌ Symbol 컬럼을 찾을 수 없습니다.")
-        print()
-        print("현재 컬럼:")
-        print(df.columns.tolist())
-        print()
+            raise RuntimeError(
+                f"Yahoo Finance ETF Screener 조회 실패 "
+                f"(offset={offset}): {e}"
+            ) from e
 
-        print("응답 앞부분:")
-        print(text[:1_000])
+        quotes = []
 
-        raise KeyError(
-            "NASDAQ 응답에 'Symbol' 컬럼이 없습니다."
+        if isinstance(result, dict):
+            quotes = result.get("quotes", []) or []
+
+        if not quotes:
+            break
+
+        for item in quotes:
+
+            symbol = (
+                item.get("symbol")
+                or item.get("ticker")
+            )
+
+            if not symbol:
+                continue
+
+            symbol = str(symbol).strip().upper()
+
+            # 미국 ETF만. ETFQuery가 이미 ETF로 제한하지만
+            # 응답에 quoteType이 있다면 한 번 더 검증한다.
+            quote_type = str(
+                item.get("quoteType", "ETF")
+            ).upper()
+
+            if quote_type not in {
+                "ETF",
+                "ETN",
+                ""
+            }:
+                continue
+
+            name = (
+                item.get("longName")
+                or item.get("shortName")
+                or item.get("displayName")
+                or symbol
+            )
+
+            exchange = (
+                item.get("exchange")
+                or item.get("fullExchangeName")
+                or ""
+            )
+
+            rows.append(
+                {
+                    "티커": symbol,
+                    "ETF명": str(name).strip(),
+                    "거래소원본": str(exchange).strip(),
+                }
+            )
+
+        count = len(quotes)
+
+        print(
+            f"     페이지 {page:>3} | "
+            f"offset={offset:>5} | "
+            f"{count:>3}개"
         )
 
-    # --------------------------------------------------------
-    # Security Name 컬럼 확인
-    # --------------------------------------------------------
+        if count < YAHOO_SCREEN_SIZE:
+            break
 
-    if "Security Name" not in df.columns:
+        offset += YAHOO_SCREEN_SIZE
 
-        print()
-        print("❌ Security Name 컬럼을 찾을 수 없습니다.")
-        print()
-        print("현재 컬럼:")
-        print(df.columns.tolist())
+        time.sleep(0.2)
 
-        raise KeyError(
-            "NASDAQ 응답에 'Security Name' 컬럼이 없습니다."
+    if not rows:
+        raise RuntimeError(
+            "Yahoo Finance ETF Screener에서 ETF 목록을 "
+            "가져오지 못했습니다."
         )
 
-    # --------------------------------------------------------
-    # ETF 컬럼 확인
-    # --------------------------------------------------------
+    df = pd.DataFrame(rows)
 
-    if "ETF" not in df.columns:
-
-        print()
-        print("❌ ETF 컬럼을 찾을 수 없습니다.")
-        print()
-        print("현재 컬럼:")
-        print(df.columns.tolist())
-
-        raise KeyError(
-            "NASDAQ 응답에 'ETF' 컬럼이 없습니다."
+    # 중복 제거
+    df = (
+        df
+        .drop_duplicates(
+            subset=["티커"],
+            keep="first"
         )
-
-    # --------------------------------------------------------
-    # 컬럼 값 정리
-    # --------------------------------------------------------
-
-    df["Symbol"] = (
-        df["Symbol"]
-        .astype(str)
-        .str.strip()
+        .reset_index(drop=True)
     )
 
-    df["Security Name"] = (
-        df["Security Name"]
-        .astype(str)
-        .str.strip()
+    # 거래소 표준화
+    df["거래소"] = (
+        df["거래소원본"]
+        .apply(_normalize_exchange)
     )
-
-    df["ETF"] = (
-        df["ETF"]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-    # --------------------------------------------------------
-    # Symbol 없는 행 제거
-    # --------------------------------------------------------
-
-    df = df[
-        df["Symbol"] != ""
-    ].copy()
-
-    # --------------------------------------------------------
-    # 마지막 File Creation 행 제거
-    # --------------------------------------------------------
-
-    df = df[
-        ~df["Symbol"].str.startswith(
-            "File Creation",
-            na=False
-        )
-    ].copy()
-
-    # --------------------------------------------------------
-    # ETF만 추출
-    # --------------------------------------------------------
-
-    df = df[
-        df["ETF"] == "Y"
-    ].copy()
-
-    # --------------------------------------------------------
-    # 컬럼 변경
-    # --------------------------------------------------------
-
-    df = df.rename(
-        columns={
-            "Symbol": "티커",
-            "Security Name": "ETF명",
-        }
-    )
-
-    # --------------------------------------------------------
-    # 거래소
-    # --------------------------------------------------------
-
-    df["거래소"] = "NASDAQ"
-
-    # --------------------------------------------------------
-    # 필요한 컬럼
-    # --------------------------------------------------------
 
     df = df[
         [
@@ -278,39 +290,111 @@ def get_nasdaq_etf():
         ]
     ].copy()
 
-    # --------------------------------------------------------
-    # 빈 티커 제거
-    # --------------------------------------------------------
+    return df
 
-    df = df[
-        df["티커"].notna()
-        & (df["티커"].astype(str).str.strip() != "")
+
+def _add_required_etfs(df):
+    """
+    Yahoo Screener 응답에서 누락될 수 있는 주요 ETF를 보완한다.
+
+    Universe 자체를 특정 ETF 목록으로 제한하는 것이 아니라,
+    스크리너 누락 시 최소한 핵심 ETF가 빠지지 않도록 하는 보완 단계다.
+    """
+
+    required = {
+        # NASDAQ
+        "QQQ": ("Invesco QQQ Trust", "NASDAQ"),
+        "TQQQ": ("ProShares UltraPro QQQ", "NASDAQ"),
+        "QLD": ("ProShares Ultra QQQ", "NASDAQ"),
+        "SQQQ": ("ProShares UltraPro Short QQQ", "NASDAQ"),
+        "PSQ": ("ProShares Short QQQ", "NASDAQ"),
+        "SOXX": ("iShares Semiconductor ETF", "NASDAQ"),
+        "SMH": ("VanEck Semiconductor ETF", "NASDAQ"),
+        # 기타 주요 미국 ETF
+        "SPY": ("SPDR S&P 500 ETF Trust", "OTHER"),
+        "VOO": ("Vanguard S&P 500 ETF", "OTHER"),
+        "IVV": ("iShares Core S&P 500 ETF", "OTHER"),
+        "VTI": ("Vanguard Total Stock Market ETF", "OTHER"),
+        "IWM": ("iShares Russell 2000 ETF", "OTHER"),
+        "DIA": ("SPDR Dow Jones Industrial Average ETF Trust", "OTHER"),
+        "XLK": ("Technology Select Sector SPDR Fund", "OTHER"),
+        "XLF": ("Financial Select Sector SPDR Fund", "OTHER"),
+    }
+
+    existing = set(
+        df["티커"].astype(str).str.upper()
+    ) if not df.empty else set()
+
+    additions = []
+
+    for ticker, (name, exchange) in required.items():
+
+        if ticker not in existing:
+
+            additions.append(
+                {
+                    "티커": ticker,
+                    "ETF명": name,
+                    "거래소": exchange
+                }
+            )
+
+    if additions:
+
+        df = pd.concat(
+            [
+                df,
+                pd.DataFrame(additions)
+            ],
+            ignore_index=True
+        )
+
+    return (
+        df
+        .drop_duplicates(
+            subset=["티커"],
+            keep="first"
+        )
+        .reset_index(drop=True)
+    )
+
+
+# ============================================================
+# Nasdaq Listed ETF
+# ============================================================
+
+def get_nasdaq_etf():
+
+    print()
+    print("-" * 70)
+    print("① Nasdaq 상장 ETF 조회")
+    print("-" * 70)
+
+    df = _get_yahoo_etf_universe()
+    df = _add_required_etfs(df)
+
+    result = df[
+        df["거래소"] == "NASDAQ"
     ].copy()
 
-    # --------------------------------------------------------
-    # 중복 제거
-    # --------------------------------------------------------
-
-    df = df.drop_duplicates(
-        subset=["티커"]
-    ).reset_index(drop=True)
-
-    # --------------------------------------------------------
-    # 결과 출력
-    # --------------------------------------------------------
+    result = (
+        result
+        .drop_duplicates(
+            subset=["티커"]
+        )
+        .sort_values("티커")
+        .reset_index(drop=True)
+    )
 
     print()
     print(
         f"Nasdaq ETF : "
-        f"{len(df):,}개"
+        f"{len(result):,}개"
     )
 
-    # --------------------------------------------------------
     # TQQQ 확인
-    # --------------------------------------------------------
-
-    tqqq = df[
-        df["티커"].str.upper() == "TQQQ"
+    tqqq = result[
+        result["티커"] == "TQQQ"
     ]
 
     print()
@@ -318,7 +402,6 @@ def get_nasdaq_etf():
     if not tqqq.empty:
 
         print("✅ TQQQ 발견!")
-
         print(
             tqqq.to_string(
                 index=False
@@ -328,12 +411,10 @@ def get_nasdaq_etf():
     else:
 
         print(
-            "⚠ TQQQ가 Nasdaq ETF 목록에 없습니다."
+            "⚠ TQQQ가 NASDAQ ETF 목록에 없습니다."
         )
 
-    return df
-
-
+    return result
 
 
 # ============================================================
@@ -344,76 +425,32 @@ def get_other_etf():
 
     print()
     print("-" * 70)
-    print("② 기타 거래소 상장 종목 조회")
+    print("② 기타 거래소 상장 ETF 조회")
     print("-" * 70)
 
-    response = requests.get(
-        OTHER_URL,
-        headers=HEADERS,
-        timeout=30
-    )
+    df = _get_yahoo_etf_universe()
+    df = _add_required_etfs(df)
 
-    response.raise_for_status()
-
-    df = pd.read_csv(
-        io.StringIO(response.text),
-        sep="|"
-    )
-
-    # --------------------------------------------------------
-    # ACT Symbol 존재 데이터
-    # --------------------------------------------------------
-
-    df = df[
-        df["ACT Symbol"].notna()
+    result = df[
+        df["거래소"] != "NASDAQ"
     ].copy()
 
-    # --------------------------------------------------------
-    # 마지막 설명 행 제거
-    # --------------------------------------------------------
-
-    df = df[
-        ~df["ACT Symbol"]
-        .astype(str)
-        .str.startswith(
-            "File Creation"
+    result = (
+        result
+        .drop_duplicates(
+            subset=["티커"]
         )
-    ].copy()
-
-    # --------------------------------------------------------
-    # ETF만
-    # --------------------------------------------------------
-
-    df = df[
-        df["ETF"] == "Y"
-    ].copy()
-
-    # --------------------------------------------------------
-    # 컬럼 변경
-    # --------------------------------------------------------
-
-    df = df.rename(
-        columns={
-            "ACT Symbol": "티커",
-            "Security Name": "ETF명",
-            "Exchange": "거래소",
-        }
+        .sort_values("티커")
+        .reset_index(drop=True)
     )
 
-    df = df[
-        [
-            "티커",
-            "ETF명",
-            "거래소"
-        ]
-    ]
-
+    print()
     print(
         f"Other Listed ETF : "
-        f"{len(df):,}개"
+        f"{len(result):,}개"
     )
 
-    return df
+    return result
 
 
 # ============================================================
@@ -426,18 +463,36 @@ def get_us_etf_universe():
     print("=" * 70)
     print("🇺🇸 미국 ETF Universe 생성")
     print("=" * 70)
+    print("NASDAQ Trader 직접 접속 없이 Yahoo Finance로 생성합니다.")
 
     # --------------------------------------------------------
-    # Nasdaq
+    # Yahoo에서 한 번만 전체 ETF 조회
     # --------------------------------------------------------
 
-    nasdaq_df = get_nasdaq_etf()
+    all_df = _get_yahoo_etf_universe()
+    all_df = _add_required_etfs(all_df)
 
     # --------------------------------------------------------
-    # 기타 거래소
+    # Nasdaq / 기타 거래소 분리
     # --------------------------------------------------------
 
-    other_df = get_other_etf()
+    nasdaq_df = (
+        all_df[
+            all_df["거래소"] == "NASDAQ"
+        ]
+        .copy()
+        .sort_values("티커")
+        .reset_index(drop=True)
+    )
+
+    other_df = (
+        all_df[
+            all_df["거래소"] != "NASDAQ"
+        ]
+        .copy()
+        .sort_values("티커")
+        .reset_index(drop=True)
+    )
 
     # --------------------------------------------------------
     # 합치기
@@ -468,31 +523,22 @@ def get_us_etf_universe():
 
     df = df[
         df["티커"].notna()
-    ].copy()
-
-    df = df[
-        df["티커"] != ""
+        & (df["티커"] != "")
+        & (df["티커"] != "NAN")
     ].copy()
 
     # --------------------------------------------------------
     # 중복 제거
     # --------------------------------------------------------
 
-    df = df.drop_duplicates(
-        subset=[
-            "티커"
-        ],
-        keep="first"
-    )
-
-    # --------------------------------------------------------
-    # 정렬
-    # --------------------------------------------------------
-
-    df = df.sort_values(
-        "티커"
-    ).reset_index(
-        drop=True
+    df = (
+        df
+        .drop_duplicates(
+            subset=["티커"],
+            keep="first"
+        )
+        .sort_values("티커")
+        .reset_index(drop=True)
     )
 
     # ========================================================
@@ -515,7 +561,6 @@ def get_us_etf_universe():
         )
 
         print()
-
         print(
             tqqq.to_string(
                 index=False
@@ -533,12 +578,12 @@ def get_us_etf_universe():
     # ========================================================
 
     os.makedirs(
-        "data",
+        "us/data",
         exist_ok=True
     )
 
     filename = (
-        "data/"
+        "us/data/"
         "미국_ETF_Universe.csv"
     )
 
@@ -589,6 +634,7 @@ def get_us_etf_universe():
     )
 
     return df
+
 
 def download_etf(
     ticker,
@@ -1385,7 +1431,7 @@ def download_etf(
 def load_etf_universe():
 
     filename = Path(
-        "data/미국_ETF_Universe.csv"
+        "us/data/미국_ETF_Universe.csv"
     )
 
 
