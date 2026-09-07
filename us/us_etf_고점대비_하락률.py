@@ -61,9 +61,11 @@ for ticker in TICKERS:
             encoding="cp949"
         )
 
-    # 필수 컬럼 확인
+    # 필수 컬럼 확인 (종가 추가)
     required_columns = [
         "날짜",
+        "종가",
+        "최고가",
         "고점_대비_하락률"
     ]
 
@@ -90,11 +92,23 @@ for ticker in TICKERS:
     temp = df[
         [
             "날짜",
+            "종가",
+            "최고가",
             "고점_대비_하락률"
         ]
     ].copy()
 
     # 숫자 변환
+    temp["종가"] = pd.to_numeric(
+        temp["종가"],
+        errors="coerce"
+    )
+
+    temp["최고가"] = pd.to_numeric(
+        temp["최고가"],
+        errors="coerce"
+    )
+
     temp["고점_대비_하락률"] = pd.to_numeric(
         temp["고점_대비_하락률"],
         errors="coerce"
@@ -103,7 +117,9 @@ for ticker in TICKERS:
     # ETF 이름으로 컬럼 변경
     temp.rename(
         columns={
-            "고점_대비_하락률": ticker
+            "종가": f"{ticker}_종가",
+            "최고가": f"{ticker}_최고가",
+            "고점_대비_하락률": f"{ticker}_하락률"
         },
         inplace=True
     )
@@ -154,19 +170,62 @@ result = result.sort_values(
 
 
 # ============================================================
-# 숫자 반올림
+# 표시용 컬럼 생성
+# "종가 (고가, 하락률 %)" 형태로 표시
+# 예: 20 (20, 0 %), 10 (20, -50 %)
 # ============================================================
 
+def format_number(value):
+    """불필요한 소수점 0을 제거하여 표시"""
+    if pd.isna(value):
+        return ""
+    value = round(float(value), 2)
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def format_display(close_value, high_value, drawdown_value):
+    """종가 (고가, 고점대비 하락률 %)를 하나의 셀로 표시"""
+    if pd.isna(close_value) or pd.isna(high_value) or pd.isna(drawdown_value):
+        return ""
+
+    close_text = format_number(close_value)
+    high_text = format_number(high_value)
+    drawdown_text = format_number(drawdown_value)
+
+    return f"{close_text} ({high_text}, {drawdown_text} %)"
+
+
+# ETF별 표시 컬럼 생성
 for ticker in TICKERS:
 
-    if ticker in result.columns:
+    close_col = f"{ticker}_종가"
+    high_col = f"{ticker}_최고가"
+    drop_col = f"{ticker}_하락률"
 
-        result[ticker] = pd.to_numeric(
-            result[ticker],
-            errors="coerce"
+    if close_col in result.columns and high_col in result.columns and drop_col in result.columns:
+
+        result[ticker] = result.apply(
+            lambda row: format_display(
+                row[close_col],
+                row[high_col],
+                row[drop_col]
+            ),
+            axis=1
         )
 
-        result[ticker] = result[ticker].round(2)
+
+# ============================================================
+# 최종 표시 컬럼만 유지
+# ============================================================
+
+display_columns = ["날짜"] + [
+    ticker for ticker in TICKERS
+    if ticker in result.columns
+]
+
+result = result[display_columns].copy()
 
 
 # ============================================================
@@ -336,8 +395,11 @@ def format_sheet(ws):
     last_data_row = ws.max_row
 
     # --------------------------------------------------------
-    # 각 ETF 컬럼의 "년도별 최소값"을 실제 데이터 셀에 표시
+    # 각 ETF 컬럼의 "년도별 최소값" 수집 및 표시
     # --------------------------------------------------------
+
+    # 요약 행에 사용할 ETF별 최소값 셀 위치 저장용
+    min_cells = {}
 
     for ticker in TICKERS:
 
@@ -345,7 +407,6 @@ def format_sheet(ws):
             continue
 
         col = header_map[ticker]
-
         values = []
 
         # --------------------------------------------
@@ -363,8 +424,19 @@ def format_sheet(ws):
                 continue
 
             try:
-                value = float(cell.value)
-                values.append((row, value))
+                # 표시 형식: "10 (20, -50 %)"
+                text_value = str(cell.value)
+
+                # 괄호 안의 하락률(마지막 콤마 뒤) 추출
+                if "(" in text_value and ")" in text_value:
+                    inside_brackets = text_value.split("(")[-1].split(")")[0]
+                    drop_text = (
+                        inside_brackets.split(",")[-1]
+                        .replace("%", "")
+                        .strip()
+                    )
+                    value = float(drop_text)
+                    values.append((row, value))
 
             except (ValueError, TypeError):
                 continue
@@ -382,10 +454,7 @@ def format_sheet(ws):
             for row, value in values
         )
 
-        # --------------------------------------------
-        # 최소값인 실제 셀을 빨간색 바탕으로 표시
-        # --------------------------------------------
-
+        # 최소 하락률에 해당하는 행 식별 및 셀 서식 적용
         for row, value in values:
 
             if value == min_value:
@@ -407,11 +476,11 @@ def format_sheet(ws):
                     vertical="center"
                 )
 
+                # 요약행에 기록할 최저값 셀 정보 저장
+                min_cells[ticker] = cell.value
+
     # --------------------------------------------------------
-    # 각 ETF 컬럼의 마지막 행에 최소값 표시
-    # --------------------------------------------------------
-    # 실제 데이터의 최소값을 다시 마지막 행에 기록합니다.
-    # 날짜 컬럼에는 "최저값"을 표시합니다.
+    # 각 ETF 컬럼의 마지막 행에 최저값 표시
     # --------------------------------------------------------
 
     summary_row = last_data_row + 1
@@ -431,46 +500,25 @@ def format_sheet(ws):
 
     for ticker in TICKERS:
 
-        if ticker not in header_map:
+        if ticker not in header_map or ticker not in min_cells:
             continue
 
         col = header_map[ticker]
-        values = []
 
-        for row in range(2, last_data_row + 1):
-
-            cell = ws.cell(
-                row=row,
-                column=col
-            )
-
-            if cell.value is None:
-                continue
-
-            try:
-                values.append(float(cell.value))
-            except (ValueError, TypeError):
-                continue
-
-        if not values:
-            continue
-
-        min_value = min(values)
-
-        # 마지막 행에 최소값 기록
+        # 저장된 최저값 셀의 문자열 기록
         summary_cell = ws.cell(
             row=summary_row,
             column=col
         )
 
-        summary_cell.value = min_value
+        summary_cell.value = min_cells[ticker]
         summary_cell.fill = MIN_FILL
         summary_cell.font = MIN_FONT
         summary_cell.alignment = Alignment(
             horizontal="center",
             vertical="center"
         )
-        summary_cell.number_format = "0.00"
+        summary_cell.number_format = "General"
 
     # --------------------------------------------------------
     # 컬럼 너비
@@ -488,9 +536,47 @@ def format_sheet(ws):
 
             col = header_map[ticker]
 
+            # "10 (20, -50 %)" 형태가 들어가므로
+            # 기존보다 더 넓게 설정
             ws.column_dimensions[
                 get_column_letter(col)
-            ].width = 12
+            ].width = 22
+
+    # --------------------------------------------------------
+    # 전체 셀 중앙 정렬
+    # --------------------------------------------------------
+
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=False
+            )
+
+    # --------------------------------------------------------
+    # 행 높이 자동 조정
+    # --------------------------------------------------------
+
+    for row_idx in range(1, ws.max_row + 1):
+        max_length = 0
+
+        for col_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(
+                row=row_idx,
+                column=col_idx
+            )
+
+            if cell.value is not None:
+                max_length = max(
+                    max_length,
+                    len(str(cell.value))
+                )
+
+        if row_idx == 1:
+            ws.row_dimensions[row_idx].height = 22
+        elif max_length > 0:
+            ws.row_dimensions[row_idx].height = 20
 
     # --------------------------------------------------------
     # 틀 고정
@@ -502,7 +588,6 @@ def format_sheet(ws):
     # 자동 필터
     # --------------------------------------------------------
 
-    # 최저값 요약행은 필터에서 제외
     if last_data_row >= 2:
 
         ws.auto_filter.ref = (
@@ -544,8 +629,10 @@ print(f"파일 : {OUTPUT_FILE}")
 print()
 print("전체 Sheet와 각 연도 Sheet에서")
 print("ETF별 최소값 실제 셀을 빨간색으로 표시하고,")
-print("각 컬럼 마지막 행에도 최소값을 기록했습니다.")
+print("각 컬럼 마지막 행에도 최소 하락률의 종가 (고가, 하락률)를 기록했습니다.")
 
 print()
 print("최소값 셀 = 빨간색 바탕 + 빨간색 굵은 글씨")
-
+print("데이터 셀 = 중앙 정렬")
+print("표시 형식 = 종가 (고가, 고점 대비 하락률 %)")
+print("마지막 행 = 최저값 표시")
